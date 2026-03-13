@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cinematic Canvas City</title>
+    <style>
+        :root {
+            --ui-color: rgba(255, 255, 255, 0.8);
+            --ui-bg: rgba(0, 0, 0, 0.4);
+            --ui-accent: #f39c12;
+            --ui-danger: #e74c3c;
+        }
+        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #000; font-family: 'Trebuchet MS', 'Lucida Sans Unicode', sans-serif; }
+        canvas { display: block; image-rendering: pixelated; width: 100vw; height: 100vh; }
+        
+        /* Cinematic UI Overlay */
+        #hud { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
+        
+        .top-hud { display: flex; justify-content: space-between; align-items: flex-start; }
+        .stats { background: var(--ui-bg); padding: 15px; border-radius: 8px; border-left: 4px solid var(--ui-accent); backdrop-filter: blur(4px); }
+        .stats div { margin-bottom: 5px; font-size: 18px; color: var(--ui-color); font-weight: bold; text-shadow: 1px 1px 2px #000; }
+        .stats span { color: #2ecc71; }
+        #wanted { color: var(--ui-danger); letter-spacing: 2px; font-size: 22px; margin-top: 10px; }
+        
+        .mission-box { background: var(--ui-bg); padding: 15px; border-radius: 8px; border-right: 4px solid #3498db; text-align: right; backdrop-filter: blur(4px); }
+        .mission-box h2 { margin: 0 0 5px 0; font-size: 16px; color: #3498db; text-transform: uppercase; letter-spacing: 1px; }
+        .mission-box p { margin: 0; color: white; font-size: 18px; text-shadow: 1px 1px 2px #000; }
+        
+        .bottom-hud { display: flex; justify-content: space-between; align-items: flex-end; }
+        #minimap-wrapper { width: 180px; height: 180px; border-radius: 50%; border: 4px solid rgba(255,255,255,0.2); overflow: hidden; background: #111; position: relative; box-shadow: 0 0 20px rgba(0,0,0,0.8); }
+        #minimap { width: 100%; height: 100%; }
+        
+        /* Cinematic Letterbox */
+        .letterbox { position: absolute; left: 0; width: 100%; height: 0%; background: #000; z-index: 20; transition: height 1s ease-in-out; }
+        #top-box { top: 0; }
+        #bottom-box { bottom: 0; }
+        
+        /* Start Screen */
+        #start-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; backdrop-filter: blur(10px); }
+        #start-screen h1 { font-size: 50px; color: var(--ui-accent); margin-bottom: 10px; letter-spacing: 5px; text-transform: uppercase; }
+        #start-screen p { font-size: 18px; margin-bottom: 30px; text-align: center; line-height: 1.5; color: #ccc; }
+        button { padding: 15px 40px; font-size: 20px; font-weight: bold; background: var(--ui-accent); color: #000; border: none; border-radius: 5px; cursor: pointer; transition: transform 0.2s; }
+        button:hover { transform: scale(1.05); }
+
+        /* Vignette & CRT Effect */
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; background: radial-gradient(circle, rgba(0,0,0,0) 40%, rgba(0,0,0,0.6) 100%); z-index: 5; }
+    </style>
+</head>
+<body>
+
+    <div id="start-screen">
+        <h1>Grand Canvas City</h1>
+        <p><b>CONTROLS:</b><br>W A S D - Move / Drive<br>Mouse - Look Around<br>Shift - Sprint / Boost<br>F - Enter/Exit Vehicle</p>
+        <button id="start-btn">ENTER CITY (Click to Lock Mouse)</button>
+    </div>
+
+    <div id="overlay"></div>
+    <div id="top-box" class="letterbox"></div>
+    <div id="bottom-box" class="letterbox"></div>
+
+    <div id="hud" style="display: none;">
+        <div class="top-hud">
+            <div class="stats">
+                <div>Health: <span id="ui-health">100</span>%</div>
+                <div>Money: $<span id="ui-money">500</span></div>
+                <div id="wanted"></div>
+            </div>
+            <div class="mission-box">
+                <h2>Current Objective</h2>
+                <p id="ui-mission">Find a vehicle</p>
+            </div>
+        </div>
+        <div class="bottom-hud">
+            <div id="minimap-wrapper">
+                <canvas id="minimap" width="180" height="180"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * PSEUDO-3D RAYCASTING ENGINE
+ * Vanilla JS cinematic open world.
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d', { alpha: false }); // Optimize
+const minimap = document.getElementById('minimap');
+const mCtx = minimap.getContext('2d');
+
+// Game Resolution (Downscaled for retro-cinematic feel & performance)
+const screenW = 640;
+const screenH = 360;
+canvas.width = screenW;
+canvas.height = screenH;
+
+// --- GAME STATE ---
+const state = {
+    running: false,
+    timeOfDay: 0, // 0 to 24000
+    weather: 'rain', // clear, rain
+    wanted: 0,
+    money: 500,
+    shake: 0,
+    cutscene: false
+};
+
+const keys = {};
+
+// --- WORLD MAP ---
+const mapW = 24;
+const mapH = 24;
+// 0 = empty, 1-4 = building textures/colors
+const worldMap = [
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,2,2,0,0,1,0,3,3,3,0,0,2,2,0,0,0,4,4,4,4,0,1],
+  [1,0,2,2,0,0,0,0,3,3,3,0,0,2,2,0,0,0,4,4,4,4,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,0,0,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,3,3,0,0,0,0,2,2,0,0,0,4,4,0,0,0,2,2,2,0,0,1],
+  [1,0,3,3,0,0,0,0,2,2,0,0,0,4,4,0,0,0,2,2,2,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,0,0,1,1,1,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,4,4,0,0,0,0,0,3,3,3,0,0,0,0,2,2,0,0,0,0,0,1],
+  [1,0,4,4,0,0,0,0,0,3,3,3,0,0,0,0,2,2,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,2,2,2,0,0,4,4,4,0,0,3,3,3,0,0,2,2,2,0,0,0,1],
+  [1,0,2,2,2,0,0,4,4,4,0,0,3,3,3,0,0,2,2,2,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+];
+
+// Colors for buildings
+const wallColors = {
+    1: { r: 100, g: 100, b: 100 }, // Concrete boundary
+    2: { r: 150, g: 50, b: 50 },   // Brick
+    3: { r: 50, g: 100, b: 150 },  // Glass
+    4: { r: 180, g: 160, b: 50 }   // Sandstone
+};
+
+// --- CLASSES ---
+
+class Player {
+    constructor() {
+        this.x = 22.0;
+        this.y = 11.5;
+        this.dirX = -1;
+        this.dirY = 0;
+        this.planeX = 0;
+        this.planeY = 0.66; // Camera FOV
+        this.moveSpeed = 0.05;
+        this.rotSpeed = 0.03;
+        this.pitch = 0; // Look up/down
+        this.z = 0; // Jump/bobbing height
+        this.health = 100;
+        this.vehicle = null;
+        this.bobTime = 0;
+    }
+
+    update() {
+        if (this.vehicle) {
+            this.handleVehicleUpdate();
+            return;
+        }
+
+        let isMoving = false;
+        let speedMultiplier = keys['Shift'] ? 1.8 : 1;
+        let currentSpeed = this.moveSpeed * speedMultiplier;
+
+        if (keys['w']) {
+            if (worldMap[Math.floor(this.x + this.dirX * currentSpeed)][Math.floor(this.y)] == 0) this.x += this.dirX * currentSpeed;
+            if (worldMap[Math.floor(this.x)][Math.floor(this.y + this.dirY * currentSpeed)] == 0) this.y += this.dirY * currentSpeed;
+            isMoving = true;
+        }
+        if (keys['s']) {
+            if (worldMap[Math.floor(this.x - this.dirX * currentSpeed)][Math.floor(this.y)] == 0) this.x -= this.dirX * currentSpeed;
+            if (worldMap[Math.floor(this.x)][Math.floor(this.y - this.dirY * currentSpeed)] == 0) this.y -= this.dirY * currentSpeed;
+            isMoving = true;
+        }
+        if (keys['a']) {
+            // Strafe left
+            if (worldMap[Math.floor(this.x - this.dirY * currentSpeed)][Math.floor(this.y)] == 0) this.x -= this.dirY * currentSpeed;
+            if (worldMap[Math.floor(this.x)][Math.floor(this.y + this.dirX * currentSpeed)] == 0) this.y += this.dirX * currentSpeed;
+            isMoving = true;
+        }
+        if (keys['d']) {
+            // Strafe right
+            if (worldMap[Math.floor(this.x + this.dirY * currentSpeed)][Math.floor(this.y)] == 0) this.x += this.dirY * currentSpeed;
+            if (worldMap[Math.floor(this.x)][Math.floor(this.y - this.dirX * currentSpeed)] == 0) this.y -= this.dirX * currentSpeed;
+            isMoving = true;
+        }
+
+        // Cinematic Head Bobbing
+        if (isMoving) {
+            this.bobTime += speedMultiplier * 0.15;
+            this.z = Math.sin(this.bobTime) * 20;
+            // Sprint Zoom
+            if (keys['Shift']) this.planeY += (0.8 - this.planeY) * 0.1;
+            else this.planeY += (0.66 - this.planeY) * 0.1;
+        } else {
+            this.z *= 0.8; // Return to center smoothly
+            this.planeY += (0.66 - this.planeY) * 0.1;
+        }
+
+        // Enter Vehicle
+        if (keys['f']) {
+            keys['f'] = false;
+            let nearest = null;
+            let minDist = 1.5;
+            vehicles.forEach(v => {
+                let dist = Math.hypot(this.x - v.x, this.y - v.y);
+                if (dist < minDist) { nearest = v; minDist = dist; }
+            });
+            if (nearest) {
+                this.vehicle = nearest;
+                document.getElementById('ui-mission').innerText = "Escape the area!";
+                triggerLetterbox(2000); // Cinematic transition
+            }
+        }
+    }
+
+    handleVehicleUpdate() {
+        let v = this.vehicle;
+        let accel = 0.005;
+        let friction = 0.95;
+        let maxSpeed = 0.3;
+
+        if (keys['w']) v.speed += accel;
+        if (keys['s']) v.speed -= accel;
+        
+        // Drifting / Steering physics
+        if (Math.abs(v.speed) > 0.01) {
+            let turnDir = v.speed > 0 ? 1 : -1;
+            if (keys['a']) v.angle -= 0.04 * turnDir;
+            if (keys['d']) v.angle += 0.04 * turnDir;
+        }
+
+        v.speed = Math.max(-maxSpeed/2, Math.min(v.speed, maxSpeed));
+        v.speed *= friction;
+
+        v.vx = Math.cos(v.angle) * v.speed;
+        v.vy = Math.sin(v.angle) * v.speed;
+
+        // Collision logic for car
+        let nextX = v.x + v.vx;
+        let nextY = v.y + v.vy;
+        let hitWall = false;
+
+        if (worldMap[Math.floor(nextX)][Math.floor(v.y)] == 0) v.x = nextX; else hitWall = true;
+        if (worldMap[Math.floor(v.x)][Math.floor(nextY)] == 0) v.y = nextY; else hitWall = true;
+
+        if (hitWall) {
+            v.speed *= -0.5; // Bounce
+            state.shake = Math.abs(v.speed) * 100; // Screen shake on crash
+            if (Math.abs(v.speed) > 0.1) this.health -= 10;
+        }
+
+        // Lock player to car and adjust camera to car's direction smoothly
+        this.x = v.x;
+        this.y = v.y;
+        this.z = -30; // Sit lower in car
+        
+        // Match camera direction to car direction smoothly
+        let targetDirX = Math.cos(v.angle);
+        let targetDirY = Math.sin(v.angle);
+        
+        // Lerp camera
+        this.dirX += (targetDirX - this.dirX) * 0.1;
+        this.dirY += (targetDirY - this.dirY) * 0.1;
+        
+        // Recalculate camera plane based on dir to maintain FOV orthogonal
+        this.planeX = -this.dirY * 0.66;
+        this.planeY = this.dirX * 0.66;
+
+        // Wider FOV based on speed
+        let speedFov = 0.66 + Math.abs(v.speed);
+        this.planeX = -this.dirY * speedFov;
+        this.planeY = this.dirX * speedFov;
+
+        // Exit
+        if (keys['f']) {
+            keys['f'] = false;
+            this.vehicle = null;
+            this.x -= this.dirX; // Step out
+            this.y -= this.dirY;
+        }
+    }
+
+    rotateCamera(movementX, movementY) {
+        if (this.vehicle) return; // Car controls rotation when driving
+        
+        // Horizontal rotation
+        let rot = -movementX * 0.003;
+        let oldDirX = this.dirX;
+        this.dirX = this.dirX * Math.cos(rot) - this.dirY * Math.sin(rot);
+        this.dirY = oldDirX * Math.sin(rot) + this.dirY * Math.cos(rot);
+        
+        let oldPlaneX = this.planeX;
+        this.planeX = this.planeX * Math.cos(rot) - this.planeY * Math.sin(rot);
+        this.planeY = oldPlaneX * Math.sin(rot) + this.planeY * Math.cos(rot);
+
+        // Vertical pitch
+        this.pitch -= movementY * 1.5;
+        this.pitch = Math.max(-150, Math.min(this.pitch, 150));
+    }
+}
+
+class Vehicle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.angle = 0;
+        this.speed = 0;
+        this.vx = 0;
+        this.vy = 0;
+        this.color = color;
+    }
+}
+
+class Particle {
+    constructor(x, y, isRain=true) {
+        this.x = x;
+        this.y = y;
+        this.z = Math.random() * screenH;
+        this.speed = isRain ? 10 + Math.random() * 5 : 1;
+    }
+    update() {
+        this.z -= this.speed;
+        if (this.z < 0) {
+            this.z = screenH;
+            this.x = Math.random() * screenW;
+            this.y = Math.random() * screenH;
+        }
+    }
+}
+
+const player = new Player();
+const vehicles = [
+    new Vehicle(20.5, 11.5, '#e74c3c'),
+    new Vehicle(18.5, 8.5, '#3498db')
+];
+const rainParticles = Array.from({length: 200}, () => new Particle(Math.random()*screenW, Math.random()*screenH));
+
+// --- RENDERING ENGINE (RAYCASTER) ---
+
+// Z-buffer for drawing sprites (pseudo-3D layering)
+let zBuffer = new Array(screenW).fill(0);
+
+function renderScene() {
+    // Determine Time of Day colors (Cinematic Lighting)
+    state.timeOfDay += 1;
+    if (state.timeOfDay > 24000) state.timeOfDay = 0;
+    
+    // Normalize time to 0-1
+    let t = state.timeOfDay / 24000;
+    // Calculate light intensity (1 at noon, 0.1 at midnight)
+    let light = 0.5 - 0.5 * Math.cos(t * Math.PI * 2); 
+    light = Math.max(0.1, light);
+    
+    let skyR = Math.floor(135 * light);
+    let skyG = Math.floor(206 * light);
+    let skyB = Math.floor(235 * light);
+    let floorR = Math.floor(50 * light);
+    let floorG = Math.floor(50 * light);
+    let floorB = Math.floor(50 * light);
+
+    // Apply Screen Shake
+    let currentPitch = player.pitch;
+    if (state.shake > 0) {
+        currentPitch += (Math.random() - 0.5) * state.shake;
+        state.shake *= 0.9; // decay
+        if (state.shake < 1) state.shake = 0;
+    }
+
+    // Draw Sky & Floor Gradients (Optimized pseudo-3D look)
+    let horizon = (screenH / 2) + currentPitch;
+    
+    ctx.fillStyle = `rgb(${skyR},${skyG},${skyB})`;
+    ctx.fillRect(0, 0, screenW, horizon);
+    
+    ctx.fillStyle = `rgb(${floorR},${floorG},${floorB})`;
+    ctx.fillRect(0, horizon, screenW, screenH - horizon);
+
+    // Raycasting Loop for Buildings
+    for (let x = 0; x < screenW; x++) {
+        let cameraX = 2 * x / screenW - 1; 
+        let rayDirX = player.dirX + player.planeX * cameraX;
+        let rayDirY = player.dirY + player.planeY * cameraX;
+
+        let mapX = Math.floor(player.x);
+        let mapY = Math.floor(player.y);
+
+        let sideDistX, sideDistY;
+        let deltaDistX = Math.abs(1 / rayDirX);
+        let deltaDistY = Math.abs(1 / rayDirY);
+        let perpWallDist;
+
+        let stepX, stepY;
+        let hit = 0;
+        let side; 
+
+        if (rayDirX < 0) { stepX = -1; sideDistX = (player.x - mapX) * deltaDistX; } 
+        else { stepX = 1; sideDistX = (mapX + 1.0 - player.x) * deltaDistX; }
+        if (rayDirY < 0) { stepY = -1; sideDistY = (player.y - mapY) * deltaDistY; } 
+        else { stepY = 1; sideDistY = (mapY + 1.0 - player.y) * deltaDistY; }
+
+        // DDA Algorithm
+        while (hit === 0) {
+            if (sideDistX < sideDistY) {
+                sideDistX += deltaDistX;
+                mapX += stepX;
+                side = 0;
+            } else {
+                sideDistY += deltaDistY;
+                mapY += stepY;
+                side = 1;
+            }
+            if (mapX < 0 || mapX >= mapW || mapY < 0 || mapY >= mapH) {
+                hit = 1; // hit boundary
+                break;
+            }
+            if (worldMap[mapX][mapY] > 0) hit = 1;
+        }
+
+        if (side === 0) perpWallDist = (mapX - player.x + (1 - stepX) / 2) / rayDirX;
+        else perpWallDist = (mapY - player.y + (1 - stepY) / 2) / rayDirY;
+
+        zBuffer[x] = perpWallDist; // Save distance for sprite rendering
+
+        // Calculate wall height and drawing positions
+        let lineHeight = Math.floor(screenH / perpWallDist);
+        
+        let drawStart = -lineHeight / 2 + screenH / 2 + currentPitch + player.z / perpWallDist;
+        let drawEnd = lineHeight / 2 + screenH / 2 + currentPitch + player.z / perpWallDist;
+
+        // Get Color and add Shading based on distance and side (Cinematic depth)
+        let texNum = worldMap[mapX][mapY];
+        if (!texNum || texNum < 1) texNum = 1;
+        let baseColor = wallColors[texNum] || wallColors[1];
+        
+        // Fog & Lighting calculations
+        let distanceDim = Math.max(0.1, 1 - (perpWallDist / 12)); // Fade out at distance 12
+        let shade = side === 1 ? 0.7 : 1; // Fake directional light
+        
+        let finalR = Math.floor(baseColor.r * light * shade * distanceDim);
+        let finalG = Math.floor(baseColor.g * light * shade * distanceDim);
+        let finalB = Math.floor(baseColor.b * light * shade * distanceDim);
+        
+        // Add fog color to blend smoothly into the sky
+        finalR = Math.floor(finalR * (1 - (1-distanceDim)) + skyR * (1-distanceDim));
+        finalG = Math.floor(finalG * (1 - (1-distanceDim)) + skyG * (1-distanceDim));
+        finalB = Math.floor(finalB * (1 - (1-distanceDim)) + skyB * (1-distanceDim));
+
+        ctx.fillStyle = `rgb(${finalR},${finalG},${finalB})`;
+        ctx.fillRect(x, drawStart, 1, drawEnd - drawStart);
+    }
+
+    // Render Vehicles (Sprites)
+    // In a real engine we'd sort these by distance, here we just do a simple pass
+    vehicles.forEach(v => {
+        if (v === player.vehicle) return; // Don't draw the car we are inside
+        
+        let spriteX = v.x - player.x;
+        let spriteY = v.y - player.y;
+
+        let invDet = 1.0 / (player.planeX * player.dirY - player.dirX * player.planeY);
+        let transformX = invDet * (player.dirY * spriteX - player.dirX * spriteY);
+        let transformY = invDet * (-player.planeY * spriteX + player.planeX * spriteY); 
+
+        if (transformY > 0) { // If in front of camera
+            let spriteScreenX = Math.floor((screenW / 2) * (1 + transformX / transformY));
+            let spriteHeight = Math.abs(Math.floor(screenH / transformY)) * 0.5; // Scale height
+            let spriteWidth = Math.abs(Math.floor(screenH / transformY));
+            
+            let drawStartY = -spriteHeight / 2 + screenH / 2 + currentPitch + (player.z + 10) / transformY;
+            
+            let drawStartX = -spriteWidth / 2 + spriteScreenX;
+            let drawEndX = spriteWidth / 2 + spriteScreenX;
+
+            // Simple Distance Dimming for sprites
+            let dim = Math.max(0.2, 1 - (transformY / 12));
+
+            // Draw Sprite if within bounds and not behind a wall
+            ctx.fillStyle = v.color;
+            for(let stripe = drawStartX; stripe < drawEndX; stripe++) {
+                if (transformY > 0 && stripe > 0 && stripe < screenW && transformY < zBuffer[Math.floor(stripe)]) {
+                    ctx.globalAlpha = dim * light;
+                    ctx.fillRect(stripe, drawStartY, 1, spriteHeight);
+                    ctx.globalAlpha = 1.0;
+                }
+            }
+        }
+    });
+
+    // Weather Effects (Rain)
+    if (state.weather === 'rain') {
+        ctx.fillStyle = `rgba(150, 200, 255, 0.3)`;
+        rainParticles.forEach(p => {
+            p.update();
+            // Apply camera movement pseudo-parallax to rain
+            let rx = (p.x + player.dirY * 200) % screenW;
+            if(rx < 0) rx += screenW;
+            ctx.fillRect(rx, p.z, 1, 15);
+        });
+    }
+
+    // UI Updates
+    document.getElementById('ui-health').innerText = Math.max(0, Math.floor(player.health));
+    document.getElementById('ui-money').innerText = state.money;
+    
+    drawMinimap();
+}
+
+function drawMinimap() {
+    mCtx.clearRect(0, 0, minimap.width, minimap.height);
+    
+    // Draw map grid
+    let cellSize = 180 / mapW;
+    for(let y=0; y<mapH; y++) {
+        for(let x=0; x<mapW; x++) {
+            if(worldMap[x][y] > 0) {
+                mCtx.fillStyle = '#555';
+                mCtx.fillRect(x*cellSize, y*cellSize, cellSize, cellSize);
+            }
+        }
+    }
+
+    // Draw Player Blip
+    mCtx.fillStyle = '#2ecc71';
+    mCtx.beginPath();
+    mCtx.arc(player.x * cellSize, player.y * cellSize, 4, 0, Math.PI*2);
+    mCtx.fill();
+    
+    // Draw View Cone
+    mCtx.strokeStyle = 'rgba(46, 204, 113, 0.5)';
+    mCtx.beginPath();
+    mCtx.moveTo(player.x * cellSize, player.y * cellSize);
+    mCtx.lineTo((player.x + player.dirX * 3 + player.planeX * 2) * cellSize, (player.y + player.dirY * 3 + player.planeY * 2) * cellSize);
+    mCtx.moveTo(player.x * cellSize, player.y * cellSize);
+    mCtx.lineTo((player.x + player.dirX * 3 - player.planeX * 2) * cellSize, (player.y + player.dirY * 3 - player.planeY * 2) * cellSize);
+    mCtx.stroke();
+
+    // Draw Vehicles
+    vehicles.forEach(v => {
+        mCtx.fillStyle = v.color;
+        mCtx.fillRect(v.x*cellSize - 2, v.y*cellSize - 2, 4, 4);
+    });
+}
+
+function triggerLetterbox(duration) {
+    if (state.cutscene) return;
+    state.cutscene = true;
+    document.getElementById('top-box').style.height = '10%';
+    document.getElementById('bottom-box').style.height = '10%';
+    setTimeout(() => {
+        document.getElementById('top-box').style.height = '0%';
+        document.getElementById('bottom-box').style.height = '0%';
+        state.cutscene = false;
+    }, duration);
+}
+
+// --- GAME LOOP ---
+function gameLoop() {
+    if (state.running) {
+        player.update();
+        renderScene();
+    }
+    requestAnimationFrame(gameLoop);
+}
+
+// --- INPUT & INIT ---
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = keys[e.key] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = keys[e.key] = false);
+
+document.getElementById('start-btn').addEventListener('click', () => {
+    document.getElementById('start-screen').style.display = 'none';
+    document.getElementById('hud').style.display = 'flex';
+    canvas.requestPointerLock = canvas.requestPointerLock || canvas.mozRequestPointerLock;
+    canvas.requestPointerLock();
+    state.running = true;
+});
+
+document.addEventListener('mousemove', e => {
+    if (document.pointerLockElement === canvas) {
+        player.rotateCamera(e.movementX, e.movementY);
+    }
+});
+
+// Resize handler to maintain aspect ratio (cinematic stretch)
+window.addEventListener('resize', () => {
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+});
+
+// Start loop
+gameLoop();
+
+</script>
+</body>
+</html>
