@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Canvas City: Open World Sandbox</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #333; font-family: 'Courier New', Courier, monospace; }
+        canvas { display: block; }
+        #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; text-shadow: 2px 2px 0 #000; color: white; }
+        .ui-box { background: rgba(0,0,0,0.5); padding: 10px; margin-bottom: 10px; border: 2px solid #555; border-radius: 5px; }
+        h1 { margin: 0 0 5px 0; font-size: 20px; color: #ffcc00; }
+        #minimap-container { position: absolute; bottom: 20px; left: 20px; width: 150px; height: 150px; border: 3px solid #ccc; border-radius: 50%; overflow: hidden; background: #222; }
+        #minimap { width: 100%; height: 100%; }
+        #wanted { color: red; font-size: 24px; letter-spacing: 5px; }
+        #instructions { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 15px; font-size: 14px; text-align: right; border-radius: 5px; pointer-events: none;}
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div class="ui-box">
+            <h1>Canvas City</h1>
+            <div>Health: <span id="health">100</span>%</div>
+            <div>Money: $<span id="money">0</span></div>
+            <div id="wanted"></div>
+            <div id="mission" style="color: #00ffcc; margin-top: 5px;">Mission: Explore the city</div>
+        </div>
+    </div>
+
+    <div id="instructions">
+        <b>CONTROLS</b><br>
+        W, A, S, D - Move / Drive<br>
+        Mouse - Aim<br>
+        Left Click - Shoot<br>
+        F - Enter/Exit Vehicle<br>
+    </div>
+
+    <div id="minimap-container">
+        <canvas id="minimap" width="150" height="150"></canvas>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * CANVAS CITY - Vanilla JS Top-Down Open World
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const minimap = document.getElementById('minimap');
+const miniCtx = minimap.getContext('2d');
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+// --- GAME STATE & GLOBALS ---
+const TILE_SIZE = 100;
+const MAP_WIDTH = 40;
+const MAP_HEIGHT = 40;
+let map = [];
+let entities = [];
+let particles = [];
+let camera = { x: 0, y: 0, zoom: 1 };
+let keys = {};
+let mouse = { x: canvas.width/2, y: canvas.height/2, worldX: 0, worldY: 0, down: false };
+
+// UI Elements
+const uiHealth = document.getElementById('health');
+const uiMoney = document.getElementById('money');
+const uiWanted = document.getElementById('wanted');
+
+// --- WORLD GENERATION ---
+// 0: Grass, 1: Road, 2: Building
+function generateMap() {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+        map[y] = [];
+        for (let x = 0; x < MAP_WIDTH; x++) {
+            // Create a grid of roads
+            if (x % 5 === 0 || y % 5 === 0) {
+                map[y][x] = 1; // Road
+            } else {
+                // Randomly place buildings or grass
+                map[y][x] = Math.random() > 0.3 ? 2 : 0; 
+            }
+        }
+    }
+}
+
+// --- CLASSES ---
+
+class Entity {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vx = 0;
+        this.vy = 0;
+        this.angle = 0;
+        this.radius = 15;
+        this.color = 'white';
+        this.type = 'entity';
+        this.markedForDeletion = false;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+    }
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+class Person extends Entity {
+    constructor(x, y, isPlayer = false) {
+        super(x, y);
+        this.isPlayer = isPlayer;
+        this.speed = 3;
+        this.health = 100;
+        this.color = isPlayer ? '#3498db' : '#e74c3c';
+        this.type = 'person';
+        this.vehicle = null;
+        this.state = 'wander'; // wander, flee
+        this.wanderAngle = Math.random() * Math.PI * 2;
+    }
+
+    update() {
+        if (this.vehicle) {
+            this.x = this.vehicle.x;
+            this.y = this.vehicle.y;
+            return;
+        }
+
+        if (this.isPlayer) {
+            this.handlePlayerInput();
+        } else {
+            this.handleNPCLogic();
+        }
+
+        // Apply movement & simple collision with buildings
+        let nextX = this.x + this.vx;
+        let nextY = this.y + this.vy;
+        
+        if (!isCollidingWithBuilding(nextX, this.y, this.radius)) this.x = nextX;
+        if (!isCollidingWithBuilding(this.x, nextY, this.radius)) this.y = nextY;
+
+        this.vx *= 0.8; // friction
+        this.vy *= 0.8;
+    }
+
+    handlePlayerInput() {
+        if (keys['w']) { this.vx = Math.cos(this.angle) * this.speed; this.vy = Math.sin(this.angle) * this.speed; }
+        if (keys['s']) { this.vx = -Math.cos(this.angle) * this.speed; this.vy = -Math.sin(this.angle) * this.speed; }
+        if (keys['a']) { this.vx = Math.cos(this.angle - Math.PI/2) * this.speed; this.vy = Math.sin(this.angle - Math.PI/2) * this.speed; }
+        if (keys['d']) { this.vx = Math.cos(this.angle + Math.PI/2) * this.speed; this.vy = Math.sin(this.angle + Math.PI/2) * this.speed; }
+        
+        this.angle = Math.atan2(mouse.worldY - this.y, mouse.worldX - this.x);
+    }
+
+    handleNPCLogic() {
+        // Simple wandering
+        if (Math.random() < 0.02) this.wanderAngle += (Math.random() - 0.5);
+        this.vx = Math.cos(this.wanderAngle) * 1;
+        this.vy = Math.sin(this.wanderAngle) * 1;
+        this.angle = this.wanderAngle;
+    }
+
+    draw(ctx) {
+        if (this.vehicle) return; // Don't draw person if in car
+        super.draw(ctx);
+        // Draw hands/gun
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        ctx.fillStyle = '#f1c40f';
+        ctx.fillRect(this.radius - 5, -5, 15, 10);
+        ctx.restore();
+    }
+}
+
+class Vehicle extends Entity {
+    constructor(x, y, isPolice = false) {
+        super(x, y);
+        this.type = 'vehicle';
+        this.isPolice = isPolice;
+        this.width = 30;
+        this.length = 60;
+        this.color = isPolice ? '#2980b9' : getRandomColor();
+        this.speed = 0;
+        this.maxSpeed = isPolice ? 15 : 12;
+        this.acceleration = 0.2;
+        this.friction = 0.95;
+        this.turnSpeed = 0.05;
+        this.driver = null;
+        this.target = null; // For police AI
+    }
+
+    update() {
+        if (this.driver && this.driver.isPlayer) {
+            this.handlePlayerDriving();
+        } else if (this.isPolice && game.wantedLevel > 0) {
+            this.handlePoliceAI();
+        } else if (this.driver) {
+            this.handleNPCDriving();
+        } else {
+            this.speed *= this.friction; // Decelerate if empty
+        }
+
+        this.vx = Math.cos(this.angle) * this.speed;
+        this.vy = Math.sin(this.angle) * this.speed;
+
+        let nextX = this.x + this.vx;
+        let nextY = this.y + this.vy;
+
+        if (!isCollidingWithBuilding(nextX, this.y, this.width/2)) this.x = nextX;
+        else this.speed *= -0.5; // Bounce
+        
+        if (!isCollidingWithBuilding(this.x, nextY, this.length/2)) this.y = nextY;
+        else this.speed *= -0.5;
+
+        // Check collision with pedestrians
+        entities.forEach(e => {
+            if (e.type === 'person' && !e.vehicle && getDistance(this.x, this.y, e.x, e.y) < this.length/2) {
+                e.health = 0;
+                createBlood(e.x, e.y);
+                if (this.driver && this.driver.isPlayer) increaseWanted(1);
+            }
+        });
+    }
+
+    handlePlayerDriving() {
+        if (keys['w']) this.speed += this.acceleration;
+        if (keys['s']) this.speed -= this.acceleration;
+        
+        if (Math.abs(this.speed) > 0.5) {
+            let turnDir = this.speed > 0 ? 1 : -1;
+            if (keys['a']) this.angle -= this.turnSpeed * turnDir;
+            if (keys['d']) this.angle += this.turnSpeed * turnDir;
+        }
+        
+        this.speed = Math.max(Math.min(this.speed, this.maxSpeed), -this.maxSpeed/2);
+        this.speed *= this.friction;
+    }
+
+    handlePoliceAI() {
+        if (!player) return;
+        let dist = getDistance(this.x, this.y, player.x, player.y);
+        if (dist > 1500) { this.markedForDeletion = true; return; } // Despawn if too far
+
+        let targetAngle = Math.atan2(player.y - this.y, player.x - this.x);
+        
+        // Simple steering towards player
+        let diff = targetAngle - this.angle;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        
+        this.angle += Math.sign(diff) * Math.min(Math.abs(diff), this.turnSpeed);
+        this.speed += this.acceleration;
+        this.speed = Math.min(this.speed, this.maxSpeed);
+    }
+
+    handleNPCDriving() {
+        this.speed += this.acceleration * 0.5;
+        this.speed = Math.min(this.speed, this.maxSpeed * 0.5);
+        // Very basic "keep driving straight" AI for traffic. Real navmesh is too large for one file.
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        
+        // Draw Car Body
+        ctx.fillStyle = this.color;
+        ctx.fillRect(-this.length/2, -this.width/2, this.length, this.width);
+        
+        // Windshield
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(-this.length/4, -this.width/2 + 2, this.length/2, this.width - 4);
+        
+        // Police Lights
+        if (this.isPolice) {
+            ctx.fillStyle = (Date.now() % 300 < 150) ? 'red' : 'blue';
+            ctx.fillRect(-5, -this.width/2 + 5, 10, this.width - 10);
+        }
+        
+        ctx.restore();
+    }
+}
+
+class Bullet extends Entity {
+    constructor(x, y, angle, owner) {
+        super(x, y);
+        this.angle = angle;
+        this.speed = 20;
+        this.owner = owner;
+        this.radius = 3;
+        this.color = '#f1c40f';
+        this.life = 100;
+        this.type = 'bullet';
+    }
+    update() {
+        this.x += Math.cos(this.angle) * this.speed;
+        this.y += Math.sin(this.angle) * this.speed;
+        this.life--;
+        if (this.life <= 0 || isCollidingWithBuilding(this.x, this.y, this.radius)) {
+            this.markedForDeletion = true;
+        }
+
+        // Check hits
+        entities.forEach(e => {
+            if (e !== this.owner && e.type === 'person' && !e.vehicle) {
+                if (getDistance(this.x, this.y, e.x, e.y) < e.radius * 2) {
+                    e.health -= 35;
+                    this.markedForDeletion = true;
+                    createBlood(this.x, this.y);
+                    if (this.owner.isPlayer) increaseWanted(1);
+                }
+            }
+        });
+    }
+}
+
+// --- HELPERS & PHYSICS ---
+function getDistance(x1, y1, x2, y2) {
+    return Math.hypot(x2 - x1, y2 - y1);
+}
+
+function isCollidingWithBuilding(x, y, buffer) {
+    let gridX = Math.floor(x / TILE_SIZE);
+    let gridY = Math.floor(y / TILE_SIZE);
+    if (gridX < 0 || gridX >= MAP_WIDTH || gridY < 0 || gridY >= MAP_HEIGHT) return true;
+    return map[gridY][gridX] === 2; // 2 is building
+}
+
+function getRandomColor() {
+    const colors = ['#e74c3c', '#2ecc71', '#f1c40f', '#9b59b6', '#ecf0f1', '#34495e'];
+    return colors[Math.floor(Math.random() * colors.length)];
+}
+
+function createBlood(x, y) {
+    // Simple particle effect
+}
+
+// --- CORE GAME ENGINE ---
+
+const game = {
+    wantedLevel: 0,
+    money: 0,
+    lastSpawn: 0
+};
+
+let player = new Person(TILE_SIZE * 5 + 50, TILE_SIZE * 5 + 50, true);
+entities.push(player);
+
+function increaseWanted(amount) {
+    if (game.wantedLevel < 5) {
+        game.wantedLevel += amount;
+        let stars = "";
+        for(let i=0; i<game.wantedLevel; i++) stars += "★";
+        uiWanted.innerText = stars;
+    }
+}
+
+// Input handling
+window.addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    
+    // Enter/Exit Vehicle
+    if (e.key.toLowerCase() === 'f') {
+        if (player.vehicle) {
+            // Exit
+            player.x = player.vehicle.x - Math.sin(player.vehicle.angle) * 40;
+            player.y = player.vehicle.y + Math.cos(player.vehicle.angle) * 40;
+            player.vehicle.driver = null;
+            player.vehicle = null;
+        } else {
+            // Enter nearest vehicle
+            let nearest = null;
+            let minDist = 60;
+            entities.forEach(ent => {
+                if (ent.type === 'vehicle') {
+                    let d = getDistance(player.x, player.y, ent.x, ent.y);
+                    if (d < minDist) { nearest = ent; minDist = d; }
+                }
+            });
+            if (nearest) {
+                if (nearest.driver && nearest.driver !== player) {
+                    // Hijack
+                    nearest.driver.vehicle = null;
+                    nearest.driver.x = nearest.x - Math.sin(nearest.angle) * 40;
+                    nearest.driver.y = nearest.y + Math.cos(nearest.angle) * 40;
+                    increaseWanted(1);
+                }
+                player.vehicle = nearest;
+                nearest.driver = player;
+            }
+        }
+    }
+});
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+window.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+window.addEventListener('mousedown', e => { 
+    if (e.button === 0 && !player.vehicle) {
+        entities.push(new Bullet(player.x, player.y, player.angle, player));
+    }
+});
+
+function spawnEntities() {
+    let now = Date.now();
+    if (now - game.lastSpawn > 1000) {
+        game.lastSpawn = now;
+        
+        // Spawn pedestrians & traffic around player
+        if (entities.length < 50) {
+            let angle = Math.random() * Math.PI * 2;
+            let dist = 500 + Math.random() * 300;
+            let sx = player.x + Math.cos(angle) * dist;
+            let sy = player.y + Math.sin(angle) * dist;
+            
+            let gridX = Math.floor(sx / TILE_SIZE);
+            let gridY = Math.floor(sy / TILE_SIZE);
+            
+            if (gridX > 0 && gridX < MAP_WIDTH && gridY > 0 && gridY < MAP_HEIGHT) {
+                if (map[gridY][gridX] === 1) { // Road
+                    let v = new Vehicle(sx, sy);
+                    let driver = new Person(sx, sy);
+                    v.driver = driver;
+                    driver.vehicle = v;
+                    entities.push(v);
+                    entities.push(driver);
+                } else if (map[gridY][gridX] === 0) { // Grass/Sidewalk
+                    entities.push(new Person(sx, sy));
+                }
+            }
+        }
+
+        // Spawn Police if wanted
+        let policeCount = entities.filter(e => e.type === 'vehicle' && e.isPolice).length;
+        if (game.wantedLevel > 0 && policeCount < game.wantedLevel * 2) {
+            let angle = Math.random() * Math.PI * 2;
+            let pCar = new Vehicle(player.x + Math.cos(angle) * 800, player.y + Math.sin(angle) * 800, true);
+            let cop = new Person(0,0);
+            pCar.driver = cop;
+            cop.vehicle = pCar;
+            entities.push(pCar);
+            entities.push(cop);
+        }
+    }
+}
+
+function update() {
+    // Translate mouse screen coordinates to world coordinates
+    mouse.worldX = mouse.x - canvas.width/2 + camera.x;
+    mouse.worldY = mouse.y - canvas.height/2 + camera.y;
+
+    spawnEntities();
+
+    // Update all entities
+    for (let i = entities.length - 1; i >= 0; i--) {
+        let e = entities[i];
+        e.update();
+        
+        // Death logic
+        if (e.type === 'person' && e.health <= 0) {
+            if (e.isPlayer) {
+                alert("WASTED! Game Over.");
+                location.reload();
+            } else {
+                game.money += 15; // Drop money
+                uiMoney.innerText = game.money;
+                e.markedForDeletion = true;
+            }
+        }
+
+        // Garbage collection for far entities (keep world clean)
+        if (!e.isPlayer && getDistance(e.x, e.y, player.x, player.y) > 2000) {
+            e.markedForDeletion = true;
+        }
+
+        if (e.markedForDeletion) entities.splice(i, 1);
+    }
+
+    // Camera follow
+    let targetX = player.vehicle ? player.vehicle.x : player.x;
+    let targetY = player.vehicle ? player.vehicle.y : player.y;
+    camera.x += (targetX - camera.x) * 0.1;
+    camera.y += (targetY - camera.y) * 0.1;
+
+    // Update UI
+    uiHealth.innerText = Math.max(0, Math.floor(player.health));
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.save();
+    // Center camera on screen
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camera.x, -camera.y);
+
+    // Draw Map (Only draw visible tiles for performance)
+    let startCol = Math.max(0, Math.floor((camera.x - canvas.width/2) / TILE_SIZE));
+    let endCol = Math.min(MAP_WIDTH, startCol + Math.ceil(canvas.width / TILE_SIZE) + 1);
+    let startRow = Math.max(0, Math.floor((camera.y - canvas.height/2) / TILE_SIZE));
+    let endRow = Math.min(MAP_HEIGHT, startRow + Math.ceil(canvas.height / TILE_SIZE) + 1);
+
+    for (let y = startRow; y < endRow; y++) {
+        for (let x = startCol; x < endCol; x++) {
+            let tile = map[y][x];
+            if (tile === 0) {
+                ctx.fillStyle = '#27ae60'; // Grass
+                ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            } else if (tile === 1) {
+                ctx.fillStyle = '#7f8c8d'; // Road
+                ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                // Road markings
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.fillRect(x * TILE_SIZE + TILE_SIZE/2 - 2, y * TILE_SIZE + 20, 4, TILE_SIZE - 40);
+            } else if (tile === 2) {
+                // Buildings (Draw with fake 3D depth)
+                ctx.fillStyle = '#2c3e50';
+                ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                // Roof
+                ctx.fillStyle = '#34495e';
+                ctx.fillRect(x * TILE_SIZE + 5, y * TILE_SIZE - 15, TILE_SIZE, TILE_SIZE);
+            }
+        }
+    }
+
+    // Draw Entities (Sort by type to draw cars over people)
+    entities.sort((a, b) => {
+        let orderA = a.type === 'vehicle' ? 1 : 0;
+        let orderB = b.type === 'vehicle' ? 1 : 0;
+        return orderA - orderB;
+    });
+
+    entities.forEach(e => e.draw(ctx));
+
+    ctx.restore();
+
+    drawMinimap();
+}
+
+function drawMinimap() {
+    miniCtx.clearRect(0, 0, minimap.width, minimap.height);
+    miniCtx.save();
+    miniCtx.translate(minimap.width/2, minimap.height/2);
+    
+    // Scale down the world for the minimap
+    let scale = 0.05;
+    miniCtx.scale(scale, scale);
+    miniCtx.translate(-camera.x, -camera.y);
+
+    // Draw roads simply
+    miniCtx.fillStyle = '#555';
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+        for (let x = 0; x < MAP_WIDTH; x++) {
+            if (map[y][x] === 1) {
+                miniCtx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            }
+        }
+    }
+
+    // Draw Entities on Minimap
+    entities.forEach(e => {
+        miniCtx.beginPath();
+        if (e.isPlayer) miniCtx.fillStyle = '#00ffcc';
+        else if (e.isPolice) miniCtx.fillStyle = 'blue';
+        else if (e.type === 'vehicle') miniCtx.fillStyle = 'white';
+        else miniCtx.fillStyle = 'red';
+        
+        let r = e.isPlayer ? 100 : 50;
+        miniCtx.arc(e.x, e.y, r, 0, Math.PI*2);
+        miniCtx.fill();
+    });
+
+    miniCtx.restore();
+}
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+// Resize listener
+window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+});
+
+// Init
+generateMap();
+gameLoop();
+
+</script>
+</body>
+</html>
